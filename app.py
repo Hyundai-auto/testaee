@@ -7,8 +7,11 @@ from flask_cors import CORS
 from playwright.async_api import async_playwright
 from concurrent.futures import ThreadPoolExecutor
 
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
+# Configurar logging detalhado
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder='static', static_url_path='')
@@ -17,7 +20,7 @@ CORS(app)
 EXTERNAL_CHECKOUT_URL = "https://pay.meuservicomei.com.br/r/a51L1PhTl58c6S86"
 EXTERNAL_BASE_URL = "https://pay.meuservicomei.com.br"
 
-# Pool de contextos reutilizáveis para máxima performance
+# Pool de contextos reutilizáveis
 class OptimizedBrowserManager:
     def __init__(self, max_contexts=5):
         self.playwright = None
@@ -30,6 +33,7 @@ class OptimizedBrowserManager:
     async def get_browser(self):
         async with self.lock:
             if not self.browser:
+                logger.info("Iniciando Playwright...")
                 self.playwright = await async_playwright().start()
                 self.browser = await self.playwright.chromium.launch(
                     headless=True,
@@ -42,18 +46,19 @@ class OptimizedBrowserManager:
                         '--single-process',
                         '--disable-extensions',
                         '--disable-plugins',
-                        '--disable-images',  # Desabilita imagens
-                        '--disable-media-session',
                     ]
                 )
+                logger.info("Playwright iniciado com sucesso")
             return self.browser
 
     async def get_context(self):
         """Obtém um contexto reutilizável do pool"""
         async with self.context_lock:
             if self.context_pool:
+                logger.debug("Reutilizando contexto do pool")
                 return self.context_pool.pop()
         
+        logger.debug("Criando novo contexto")
         browser = await self.get_browser()
         context = await browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -80,15 +85,18 @@ browser_manager = OptimizedBrowserManager(max_contexts=5)
 
 async def automate_pix_generation(payer_name, payer_cpf, payer_phone, payer_email=None):
     """
-    Gera PIX com máxima velocidade através de automação otimizada.
-    Tempo esperado: 2-4 segundos (vs 10+ segundos anterior)
+    Gera PIX com captura melhorada de redirecionamento.
     """
+    logger.info(f"Iniciando geração de PIX para: {payer_name}")
+    
     if not payer_email:
         safe_name = ''.join(c for c in payer_name.lower() if c.isalpha() or c == ' ').replace(' ', '.')
         payer_email = f"{safe_name}@gmail.com"
     
     cpf_clean = ''.join(c for c in payer_cpf if c.isdigit())
     phone_clean = ''.join(c for c in payer_phone if c.isdigit())
+    
+    logger.debug(f"Email: {payer_email}, CPF: {cpf_clean}, Telefone: {phone_clean}")
     
     context = await browser_manager.get_context()
     page = None
@@ -97,63 +105,104 @@ async def automate_pix_generation(payer_name, payer_cpf, payer_phone, payer_emai
     
     try:
         page = await context.new_page()
+        logger.debug("Página criada")
+        
+        # Armazenar todas as respostas para análise
+        captured_responses = []
         
         # Bloqueio agressivo de recursos inúteis
         async def block_resources(route):
             resource_type = route.request.resource_type
-            # Bloqueia apenas o essencial
-            if resource_type in ["image", "font", "media", "stylesheet", "script"]:
-                # Permite scripts que podem ser necessários
-                if resource_type != "script":
-                    return await route.abort()
+            if resource_type in ["image", "font", "media"]:
+                return await route.abort()
             
             url = route.request.url.lower()
-            # Bloqueia domínios de tracking
-            if any(domain in url for domain in ["facebook", "google-analytics", "hotjar", "clarity", "tiktok", "segment", "mixpanel"]):
+            if any(domain in url for domain in ["facebook", "google-analytics", "hotjar", "clarity", "tiktok"]):
                 return await route.abort()
             
             await route.continue_()
         
         await page.route("**/*", block_resources)
+        logger.debug("Bloqueio de recursos configurado")
         
         # Event para capturar resposta de sucesso
         response_received = asyncio.Event()
         
         async def handle_response(response):
             nonlocal pix_url, error_msg
-            if '/orders' in response.url:
+            
+            url = response.url
+            logger.debug(f"Resposta recebida: {url}")
+            
+            # Captura todas as respostas para análise
+            if response.status < 400:
+                try:
+                    captured_responses.append({
+                        'url': url,
+                        'status': response.status,
+                        'timestamp': asyncio.get_event_loop().time()
+                    })
+                except:
+                    pass
+            
+            # Procura por endpoints de pedido
+            if '/orders' in url or '/pagamento' in url or '/checkout' in url:
+                logger.info(f"Endpoint de pedido detectado: {url}")
                 try:
                     data = await response.json()
+                    logger.debug(f"Resposta JSON: {json.dumps(data, indent=2)}")
+                    
                     if 'redirect' in data and data['redirect']:
                         redirect = data['redirect']
                         pix_url = redirect if redirect.startswith('http') else f"{EXTERNAL_BASE_URL}/{redirect.lstrip('/')}"
-                        response_received.set()  # Sinaliza sucesso
+                        logger.info(f"URL de redirecionamento capturada: {pix_url}")
+                        response_received.set()
+                    elif 'url' in data and data['url']:
+                        pix_url = data['url']
+                        logger.info(f"URL capturada do campo 'url': {pix_url}")
+                        response_received.set()
+                    elif 'pix_url' in data and data['pix_url']:
+                        pix_url = data['pix_url']
+                        logger.info(f"URL capturada do campo 'pix_url': {pix_url}")
+                        response_received.set()
                     elif 'errors' in data:
                         errors = data['errors']
                         first_error = list(errors.values())[0]
                         error_msg = first_error[0] if isinstance(first_error, list) else str(first_error)
-                        response_received.set()  # Sinaliza erro
+                        logger.error(f"Erro na resposta: {error_msg}")
+                        response_received.set()
                 except Exception as e:
-                    logger.debug(f"Erro ao processar resposta: {e}")
+                    logger.debug(f"Erro ao processar resposta JSON: {e}")
         
         page.on('response', handle_response)
+        logger.debug("Handler de resposta configurado")
         
-        # Navegação ultra-rápida com timeout reduzido
+        # Navegação
+        logger.info(f"Navegando para: {EXTERNAL_CHECKOUT_URL}")
         try:
-            await page.goto(EXTERNAL_CHECKOUT_URL, wait_until='commit', timeout=8000)
+            await page.goto(EXTERNAL_CHECKOUT_URL, wait_until='domcontentloaded', timeout=12000)
+            logger.info("Navegação concluída")
         except Exception as e:
             logger.warning(f"Erro na navegação: {e}")
         
-        # Injeção direta de dados via JS com detecção mais rápida
+        # Aguardar carregamento da página
+        await asyncio.sleep(1)
+        
+        # Injeção direta de dados via JS
+        logger.info("Injetando dados do formulário...")
         try:
-            await page.evaluate("""async (data) => {
+            result = await page.evaluate("""async (data) => {
                 return new Promise((resolve, reject) => {
                     let attempts = 0;
-                    const maxAttempts = 20;  // Reduzido de 40
+                    const maxAttempts = 30;
                     const checkInterval = setInterval(() => {
                         attempts++;
+                        console.log(`Tentativa ${attempts}: procurando window.form`);
+                        
                         if (window.form && typeof realizarPagamento === 'function') {
+                            console.log('window.form encontrado! Preenchendo dados...');
                             clearInterval(checkInterval);
+                            
                             window.form.email = data.email;
                             window.form.first_name = data.name;
                             window.form.doc = data.cpf;
@@ -168,16 +217,18 @@ async def automate_pix_generation(payer_name, payer_cpf, payer_phone, payer_emai
                             window.form.address_disabled = 1;
                             window.form.payment_method = 'pix_appmax';
                             
+                            console.log('Dados preenchidos. Chamando realizarPagamento...');
                             const btn = document.querySelector('#general-submit-button') || document.createElement('button');
                             btn.disabled = false;
                             realizarPagamento(btn);
-                            resolve();
+                            resolve('Pagamento iniciado');
                         }
+                        
                         if (attempts > maxAttempts) {
                             clearInterval(checkInterval);
-                            reject('Timeout');
+                            reject('Timeout: window.form não encontrado após ' + maxAttempts + ' tentativas');
                         }
-                    }, 50);  // Reduzido de 100ms para 50ms
+                    }, 100);
                 });
             }""", {
                 'email': payer_email,
@@ -185,33 +236,59 @@ async def automate_pix_generation(payer_name, payer_cpf, payer_phone, payer_emai
                 'cpf': cpf_clean,
                 'phone': phone_clean
             })
+            logger.info(f"Injeção JS resultado: {result}")
         except Exception as e:
-            logger.debug(f"Erro na injeção JS: {e}")
+            logger.warning(f"Erro na injeção JS: {e}")
         
-        # Aguarda resposta com timeout agressivo
+        # Aguardar resposta com timeout aumentado
+        logger.info("Aguardando resposta do servidor (timeout: 8s)...")
         try:
-            await asyncio.wait_for(response_received.wait(), timeout=3.0)
+            await asyncio.wait_for(response_received.wait(), timeout=8.0)
+            logger.info("Resposta recebida com sucesso")
         except asyncio.TimeoutError:
-            # Se não recebeu resposta, tenta verificar URL
-            if 'obrigado' in page.url:
-                pix_url = page.url
-            else:
-                logger.warning("Timeout aguardando resposta do servidor")
+            logger.warning("Timeout aguardando resposta do servidor")
+            
+            # Fallback 1: Verificar URL da página
+            current_url = page.url
+            logger.info(f"URL atual da página: {current_url}")
+            if 'obrigado' in current_url or 'sucesso' in current_url or 'pix' in current_url:
+                pix_url = current_url
+                logger.info(f"PIX URL capturada da URL da página: {pix_url}")
+            
+            # Fallback 2: Procurar por elemento com URL
+            try:
+                pix_element = await page.query_selector('[data-pix-url], [data-redirect], .pix-url, .redirect-url')
+                if pix_element:
+                    pix_url = await pix_element.get_attribute('href') or await pix_element.text_content()
+                    logger.info(f"PIX URL capturada de elemento: {pix_url}")
+            except:
+                pass
+            
+            # Fallback 3: Polling rápido
+            if not pix_url:
+                logger.info("Tentando polling rápido...")
+                for i in range(15):
+                    if pix_url or error_msg:
+                        break
+                    current_url = page.url
+                    if 'obrigado' in current_url or 'sucesso' in current_url:
+                        pix_url = current_url
+                        logger.info(f"PIX URL capturada via polling: {pix_url}")
+                        break
+                    await asyncio.sleep(0.5)
         
-        # Fallback: polling rápido como último recurso
-        if not pix_url and not error_msg:
-            for _ in range(10):  # Reduzido de 50
-                if pix_url or error_msg:
-                    break
-                if 'obrigado' in page.url:
-                    pix_url = page.url
-                    break
-                await asyncio.sleep(0.1)  # Reduzido de 0.2
+        # Log final
+        if pix_url:
+            logger.info(f"✅ PIX gerado com sucesso: {pix_url}")
+        else:
+            logger.error(f"❌ Falha ao gerar PIX. Respostas capturadas: {len(captured_responses)}")
+            if captured_responses:
+                logger.debug(f"Respostas: {json.dumps(captured_responses, indent=2)}")
             
     except Exception as e:
         if not pix_url:
             error_msg = str(e)
-            logger.error(f"Erro geral: {error_msg}")
+            logger.error(f"❌ Erro geral: {error_msg}")
     finally:
         if page:
             try:
@@ -237,13 +314,13 @@ executor = ThreadPoolExecutor(max_workers=5)
 @app.route('/proxy/pix', methods=['POST'])
 def proxy_pix():
     """
-    Endpoint otimizado para geração de PIX.
-    Responde em 2-4 segundos em vez de 10+ segundos.
+    Endpoint para geração de PIX com logging detalhado.
     """
     try:
         data = request.get_json()
+        logger.info(f"Requisição recebida: {data}")
         
-        # Executa em thread separada para não bloquear Flask
+        # Executa em thread separada
         pix_url, error = run_async_in_thread(
             automate_pix_generation(
                 data.get('payer_name', ''),
@@ -254,21 +331,25 @@ def proxy_pix():
         )
         
         if pix_url:
+            logger.info(f"✅ Retornando PIX URL: {pix_url}")
             return jsonify({
                 'success': True, 
                 'pixUrl': pix_url,
-                'timestamp': asyncio.get_event_loop().time()
+                'redirectUrl': pix_url
             }), 200
         else:
+            logger.error(f"❌ Erro ao gerar PIX: {error}")
             return jsonify({
                 'success': False, 
-                'error': error or 'Erro ao gerar PIX'
+                'error': error or 'Erro ao gerar PIX',
+                'message': 'Não foi possível gerar o PIX. Tente novamente.'
             }), 400
     except Exception as e:
-        logger.error(f"Erro no endpoint: {e}")
+        logger.error(f"❌ Erro no endpoint: {e}", exc_info=True)
         return jsonify({
             'success': False, 
-            'error': str(e)
+            'error': str(e),
+            'message': 'Erro interno do servidor'
         }), 500
 
 @app.route('/')
@@ -277,9 +358,9 @@ def index():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'timestamp': asyncio.get_event_loop().time()})
+    return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    # Usar Gunicorn em produção: gunicorn -w 4 -b 0.0.0.0:5000 app:app
+    logger.info(f"Iniciando servidor na porta {port}")
     app.run(host='0.0.0.0', port=port, threaded=True, debug=False)
