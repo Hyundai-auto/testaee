@@ -2,7 +2,7 @@ services:
   - type: web
     name: checkout-proxy
     env: docker
-    plan: standard  # Aumentado de 'free' para melhor performance
+    plan: standard
     envVars:
       - key: PORT
         value: 5000
@@ -13,18 +13,10 @@ services:
     
     # Configurações de health check
     healthCheckPath: /health
-    healthCheckInterval: 30  # segundos
+    healthCheckInterval: 30
     
-    # Configurações de auto-scaling (se disponível no plano)
-    # maxInstances: 3
-    # minInstances: 1
-    
-    # Configurações de timeout
-    timeout: 30  # segundos para requisição completar
-    
-    # Configurações de memória e CPU
-    # memoryLimit: 512  # MB
-    # cpuLimit: 0.5    # CPUs
+    # Timeout reduzido para refletir a otimização
+    timeout: 15
     
     # Variáveis de build
     buildCommand: pip install -r requirements.txt && playwright install chromium
