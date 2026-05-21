@@ -19,10 +19,10 @@ RUN playwright install chromium
 EXPOSE 5000
 
 # Usar Gunicorn em produção para melhor performance
-# Instalar Gunicorn e gevent para workers assíncronos
-RUN pip install --no-cache-dir gunicorn gevent
+# Instalar Gunicorn
+RUN pip install --no-cache-dir gunicorn
 
 # Comando para iniciar a aplicação com Gunicorn
-# 4 workers gevent = melhor throughput para requisições paralelas com I/O bound
-# timeout 15s = suficiente para geração de PIX otimizada
-CMD ["gunicorn", "-k", "gevent", "-w", "4", "-b", "0.0.0.0:5000", "--timeout", "15", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
+# 4 workers = melhor throughput para requisições paralelas
+# timeout 30s = suficiente para geração de PIX
+CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "--timeout", "30", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
