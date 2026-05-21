@@ -3,3 +3,4 @@ flask-cors==4.0.0
 requests==2.31.0
 playwright==1.43.0
 gunicorn==21.2.0
+gevent==24.2.1
