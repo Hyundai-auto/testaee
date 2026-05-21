@@ -1,25 +1,28 @@
-# Use a imagem oficial do Python com Playwright
+# Use a imagem oficial do Python com Playwright pré-instalado
 FROM mcr.microsoft.com/playwright/python:v1.43.0-jammy
 
 # Definir diretório de trabalho
 WORKDIR /app
 
-# Copiar requirements e instalar dependências
+# Copiar arquivos de requisitos e instalar dependências
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar código
+# Copiar o restante do código
 COPY . .
 
-# Instalar Chromium
+# O Playwright já vem com os navegadores na imagem da Microsoft, 
+# mas garantimos que o Chromium está pronto
 RUN playwright install chromium
 
-# Expor porta
+# Expor a porta que o Flask usa
 EXPOSE 5000
 
-# Variáveis de otimização
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
+# Usar Gunicorn em produção para melhor performance
+# Instalar Gunicorn
+RUN pip install --no-cache-dir gunicorn
 
-# Comando para iniciar com Gunicorn otimizado
-CMD ["gunicorn", "-w", "8", "-b", "0.0.0.0:5000", "--worker-class=sync", "--worker-connections=1000", "--max-requests=1000", "--max-requests-jitter=50", "--timeout=30", "--access-logfile=-", "--error-logfile=-", "--log-level=warning", "app:app"]
+# Comando para iniciar a aplicação com Gunicorn
+# 4 workers = melhor throughput para requisições paralelas
+# timeout 30s = suficiente para geração de PIX
+CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "--timeout", "30", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
